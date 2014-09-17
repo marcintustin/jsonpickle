@@ -27,6 +27,7 @@ import decimal
 import re
 import sys
 import time
+import functools
 
 from jsonpickle import util
 from jsonpickle.compat import unicode
@@ -181,23 +182,29 @@ class OrderedDictReduceHandler(SimpleReduceHandler):
         # [key, value] list pairs inside a tuple.
         # Recreate that structure so that the file format
         # is consistent between python versions.
-        flatten = self.context.flatten
-        reduced = obj.__reduce__()
-        factory = flatten(reduced[0], reset=False)
-        pairs = [list(x) for x in reduced[-1]]
-        args = flatten((pairs,), reset=False)
-        data['__reduce__'] = [factory, args]
+        flatten = functools.partial(self.context.flatten, reset=False)
+        factory = flatten(type(obj))
+        pairs = [[flatten(k), flatten(v)] for k, v in obj.items()]
+        data['__reduce__'] = [factory, (), None, None, pairs]
         return data
+
+    def restore(self, data):
+        restore = self.context.restore
+        factory, args, state, listitems, dictitems = [restore(i, reset=False) for i in data['__reduce__']]
+        obj = factory(*args)
+        for k, v in dictitems:
+            obj[k] = v
+        return obj
 
 
 SimpleReduceHandler.handles(time.struct_time)
 SimpleReduceHandler.handles(datetime.timedelta)
 if sys.version_info >= (2, 7):
     SimpleReduceHandler.handles(collections.Counter)
-    if sys.version_info >= (3, 4):
-        OrderedDictReduceHandler.handles(collections.OrderedDict)
-    else:
-        SimpleReduceHandler.handles(collections.OrderedDict)
+#    if sys.version_info >= (3, 4):
+    OrderedDictReduceHandler.handles(collections.OrderedDict)
+#    else:
+#        SimpleReduceHandler.handles(collections.OrderedDict)
 
 if sys.version_info >= (3, 0):
     SimpleReduceHandler.handles(decimal.Decimal)

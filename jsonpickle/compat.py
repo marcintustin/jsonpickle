@@ -1,3 +1,4 @@
+from __future__ import print_function
 import sys
 
 PY_MAJOR = sys.version_info[0]
@@ -6,10 +7,12 @@ PY2 = PY_MAJOR == 2
 PY3 = PY_MAJOR == 3
 PY32 = PY3 and PY_MINOR == 2
 
+
 try:
     bytes = bytes
 except NameError:
     bytes = str
+
 
 try:
     set = set
@@ -17,15 +20,18 @@ except NameError:
     from sets import Set as set
     set = set
 
+
 try:
     unicode = unicode
 except NameError:
     unicode = str
 
+
 try:
     long = long
 except NameError:
     long = int
+
 
 try:
     unichr = unichr

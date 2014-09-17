@@ -163,39 +163,61 @@ class Pickler(object):
     def _list_recurse(self, obj):
         return [self._flatten(v) for v in obj]
 
+    def _flatten_primitive(self, obj):
+        return obj
+
+    def _flatten_tuple(self, obj):
+        if self._mkref(obj):
+            return {tags.TUPLE: [self._flatten(v) for v in obj]}
+        return self._getref(obj)
+
+    def _flatten_set(self, obj):
+        if self._mkref(obj):
+            return {tags.SET: [self._flatten(v) for v in obj]}
+        return self._getref(obj)
+
     def _get_flattener(self, obj):
+
+        list_recurse = self._list_recurse
+        mkref = self._mkref(obj)
+
+        if not self.unpicklable and (util.is_tuple(obj)
+                                     or util.is_set(obj)
+                                     or util.is_list(obj)):
+            return list_recurse
 
         if PY2 and isinstance(obj, file):
             return self._flatten_file
 
-        if util.is_primitive(obj):
-            return lambda obj: obj
-
-        list_recurse = self._list_recurse
-
         if util.is_list(obj):
-            if self._mkref(obj):
+            if mkref:
                 return list_recurse
             else:
                 self._push()
                 return self._getref
 
-        # We handle tuples and sets by encoding them in a "(tuple|set)dict"
-        if util.is_tuple(obj):
-            if not self.unpicklable:
-                return list_recurse
-            return lambda obj: {tags.TUPLE: [self._flatten(v) for v in obj]}
-
-        if util.is_set(obj):
-            if not self.unpicklable:
-                return list_recurse
-            return lambda obj: {tags.SET: [self._flatten(v) for v in obj]}
-
-        if util.is_dictionary(obj):
-            return self._flatten_dict_obj
+        if util.is_primitive(obj):
+            return self._flatten_primitive
 
         if util.is_type(obj):
             return _mktyperef
+
+        # ################# below here, things which should be refd
+        # We've seen this object before so place an object
+        # reference tag in the data. This avoids infinite recursion
+        # when processing cyclical objects.
+        if not mkref:
+            return self._getref
+
+        # We handle tuples and sets by encoding them in a "(tuple|set)dict"
+        if util.is_tuple(obj):
+            return self._flatten_tuple
+
+        if util.is_set(obj):
+            return self._flatten_set
+
+        if util.is_dictionary(obj):
+            return self._flatten_dict_obj
 
         if util.is_object(obj):
             return self._ref_obj_instance
@@ -207,19 +229,6 @@ class Pickler(object):
         self._pickle_warning(obj)
         return None
 
-    def _ref_obj_instance(self, obj):
-        """Reference an existing object or flatten if new
-        """
-        if self._mkref(obj):
-            # We've never seen this object so return its
-            # json representation.
-            return self._flatten_obj_instance(obj)
-        # We've seen this object before so place an object
-        # reference tag in the data. This avoids infinite recursion
-        # when processing cyclical objects.
-        return self._getref(obj)
-
-
     def _flatten_file(self, obj):
         """
         Special case file objects
@@ -227,7 +236,7 @@ class Pickler(object):
         assert not PY3 and isinstance(obj, file)
         return None
 
-    def _flatten_obj_instance(self, obj):
+    def _ref_obj_instance(self, obj):
         """Recursively flatten an instance and return a json-friendly dict
         """
         data = {}
@@ -353,8 +362,8 @@ class Pickler(object):
 
             data[tags.REDUCE] = list(map(self._flatten, rv_as_list))
 
-            # lift out iterators, so we don't have to iterator and uniterator their content
-            # on unpickle
+            # lift out iterators, so we don't have to iterator and uniterator
+            # their content on unpickle
             if data[tags.REDUCE][3]:
                 data[tags.REDUCE][3] = data[tags.REDUCE][3][tags.ITERATOR]
 
@@ -390,23 +399,22 @@ class Pickler(object):
 
         return data
 
-
     def _flatten_dict_obj(self, obj, data=None):
         """Recursively call flatten() and return json-friendly dict
         """
+
         if data is None:
             data = obj.__class__()
 
-        flatten = self._flatten_key_value_pair
         for k, v in sorted(obj.items(), key=util.itemgetter):
-            flatten(k, v, data)
+            self._flatten_key_value_pair(k, v, data)
 
         # the collections.defaultdict protocol
         if hasattr(obj, 'default_factory') and callable(obj.default_factory):
             factory = obj.default_factory
             if util.is_type(factory):
                 # Reference the type
-                value = _mktyperef(factory)
+                value = self._get_flattener(factory)(factory)
             else:
                 # Create an instance from the factory and assume that the
                 # resulting instance is a suitable examplar.
@@ -414,6 +422,7 @@ class Pickler(object):
             data['default_factory'] = value
 
         return data
+
 
     def _flatten_obj_attrs(self, obj, attrs, data):
         flatten = self._flatten_key_value_pair
@@ -452,6 +461,7 @@ class Pickler(object):
                                            context=self, backend=self.backend,
                                            make_refs=self.make_refs)
             else:
+                self._mkref(k)
                 try:
                     k = repr(k)
                 except:

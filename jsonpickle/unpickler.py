@@ -124,6 +124,11 @@ class Unpickler(object):
             method(obj, attr, proxy)
 
     def _restore(self, obj):
+        # This is a placeholder proxy object which allows child objects to
+        # reference the parent object before it has been instantiated.
+        proxy = _Proxy()
+        self._mkref(proxy)
+
         if has_tag(obj, tags.ID):
             restore = self._restore_id
         elif has_tag(obj, tags.REF): # Backwards compatibility
@@ -149,13 +154,21 @@ class Unpickler(object):
         elif util.is_dictionary(obj):
             restore = self._restore_dict
         else:
-            restore = lambda x: x
-        return restore(obj)
+            restore = self._identity_restore
+        return restore(obj, proxy)
 
-    def _restore_iterator(self, obj):
-        return iter(self._restore_list(obj[tags.ITERATOR]))
+    def _identity_restore(self, obj, proxy):
+        self._swapref(proxy, obj)
+        return obj
 
-    def _restore_reduce(self, obj):
+    def _restore_iterator(self, obj, proxy):
+        listproxy = _Proxy()
+        self._mkref(listproxy)
+        instance = iter(self._restore_list(obj[tags.ITERATOR], listproxy))
+        self._swapref(proxy, instance)
+        return instance
+
+    def _restore_reduce(self, obj, proxy):
         """
         Supports restoring with all elements of __reduce__ as per pep 307.
         Assumes that iterator items (the last two) are represented as lists
@@ -194,42 +207,56 @@ class Unpickler(object):
             for k, v in dictitems:
                 stage1.__setitem__(k, v)
 
+        self._swapref(proxy, stage1)
         return stage1
 
-    def _restore_id(self, obj):
-        return self._objs[obj[tags.ID]]
+    def _restore_id(self, obj, proxy):
+        instance = self._objs[obj[tags.ID]]
+        self._swapref(proxy, instance)
+        return instance
 
-    def _restore_ref(self, obj):
-        return self._namedict.get(obj[tags.REF])
+    def _restore_ref(self, obj, proxy):
+        instance = self._namedict.get(obj[tags.REF])
+        self._swapref(proxy, instance)
+        return instance
 
-    def _restore_type(self, obj):
+    def _restore_type(self, obj, proxy):
         typeref = loadclass(obj[tags.TYPE])
         if typeref is None:
-            return obj
-        return typeref
+            instance = obj
+        else:
+            instance = typeref
+        self._swapref(proxy, instance)
+        return instance
 
-    def _restore_repr(self, obj):
+    def _restore_repr(self, obj, proxy):
         if self.safe:
             # eval() is not allowed in safe mode
             return None
         obj = loadrepr(obj[tags.REPR])
+        self._swapref(proxy, obj)
         return self._mkref(obj)
 
-    def _restore_object(self, obj):
+    def _restore_object(self, obj, proxy):
         class_name = obj[tags.OBJECT]
+
         handler = handlers.get(class_name)
         if handler is not None: # custom handler
             instance = handler(self).restore(obj)
-            return self._mkref(instance)
+            self._swapref(proxy, instance)
+            return instance
 
         cls = loadclass(class_name)
         if cls is None:
-            return self._mkref(obj)
+            self._swapref(proxy, obj)
+            return obj
 
-        return self._restore_object_instance(obj, cls)
+        return self._restore_object_instance(obj, cls, proxy)
 
-    def _restore_function(self, obj):
-        return loadclass(obj[tags.FUNCTION])
+    def _restore_function(self, obj, proxy):
+        instance = loadclass(obj[tags.FUNCTION])
+        self._swapref(proxy, instance)
+        return instance
 
     def _loadfactory(self, obj):
         try:
@@ -239,7 +266,7 @@ class Unpickler(object):
         del obj['default_factory']
         return self._restore(default_factory)
 
-    def _restore_object_instance(self, obj, cls):
+    def _restore_object_instance(self, obj, cls, proxy):
         factory = self._loadfactory(obj)
         if has_tag(obj, tags.NEWARGSEX):
             args, kwargs = obj[tags.NEWARGSEX]
@@ -247,19 +274,16 @@ class Unpickler(object):
             args = getargs(obj)
             kwargs = {}
 
-        is_oldstyle = not (isinstance(cls, type) or getattr(cls, '__meta__', None))
-
-        # This is a placeholder proxy object which allows child objects to
-        # reference the parent object before it has been instantiated.
-        proxy = _Proxy()
-        self._mkref(proxy)
+        is_oldstyle = (not (isinstance(cls, type) or 
+                            getattr(cls, '__meta__', None)))
 
         if args:
             args = self._restore(args)
         if kwargs:
             kwargs = self._restore(kwargs)
         try:
-            if (not is_oldstyle) and hasattr(cls, '__new__'): # new style classes
+            # new style classes
+            if (not is_oldstyle) and hasattr(cls, '__new__'): 
                 if factory:
                     instance = cls.__new__(cls, factory, *args, **kwargs)
                     instance.default_factory = factory
@@ -279,7 +303,6 @@ class Unpickler(object):
                 except:  # fail gracefully
                     return self._mkref(obj)
 
-        proxy.instance = instance
         self._swapref(proxy, instance)
 
         if isinstance(instance, tuple):
@@ -356,26 +379,31 @@ class Unpickler(object):
             instance = state
         return instance
 
-    def _restore_list(self, obj):
+    def _restore_list(self, obj, proxy):
         parent = []
-        self._mkref(parent)
+        self._swapref(proxy, parent)
         children = [self._restore(v) for v in obj]
         parent.extend(children)
         method = _obj_setvalue
         proxies = [(parent, idx, value, method)
-                    for idx, value in enumerate(parent)
-                        if isinstance(value, _Proxy)]
+                   for idx, value in enumerate(parent)
+                   if isinstance(value, _Proxy)]
         self._proxies.extend(proxies)
         return parent
 
-    def _restore_tuple(self, obj):
-        return tuple([self._restore(v) for v in obj[tags.TUPLE]])
+    def _restore_tuple(self, obj, proxy):
+        instance = tuple([self._restore(v) for v in obj[tags.TUPLE]])
+        self._swapref(proxy, instance)
+        return instance
 
-    def _restore_set(self, obj):
-        return set([self._restore(v) for v in obj[tags.SET]])
+    def _restore_set(self, obj, proxy):
+        instance = set([self._restore(v) for v in obj[tags.SET]])
+        self._swapref(proxy, instance)
+        return instance
 
-    def _restore_dict(self, obj):
+    def _restore_dict(self, obj, proxy):
         data = {}
+        self._swapref(proxy, data)
         restore_key = self._restore_key_fn()
         for k, v in sorted(obj.items(), key=util.itemgetter):
             self._namestack.append(k)
@@ -446,6 +474,7 @@ class Unpickler(object):
         return obj
 
     def _swapref(self, proxy, instance):
+        proxy.instance = instance
         proxy_id = id(proxy)
         instance_id = id(instance)
 
@@ -454,6 +483,7 @@ class Unpickler(object):
 
         self._objs[-1] = instance
         self._namedict[self._refname()] = instance
+
 
 
 def loadclass(module_and_name):
